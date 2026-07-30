@@ -1,0 +1,176 @@
+name: package CI
+
+# The point of this repo is layout, so the checks are about layout: every target
+# must resolve, and each artifact must be re-rooted at its own subtree carrying
+# none of the path above it and none of the other languages.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out this repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: awkward-lib
+          persist-credentials: false
+
+      # zed-cli path-depends on ../zed-interfaces, so they must be siblings.
+      - name: Check out zed-cli
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: zed-pkg/zed-cli
+          path: zed-cli
+          persist-credentials: false
+      - name: Check out zed-interfaces
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: zed-pkg/zed-interfaces
+          path: zed-interfaces
+          persist-credentials: false
+
+      - name: Validate workflow
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: awkward-lib/.github/workflows/ci.yml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the zed CLI
+        run: cargo build --release --bin zed --manifest-path zed-cli/Cargo.toml
+
+      - name: Every declared target resolves to a real directory
+        working-directory: awkward-lib
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          with Path(".zpkg.toml").open("rb") as handle:
+              targets = tomllib.load(handle)["targets"]
+
+          assert set(targets) == {"nodejs", "python", "rust", "repository"}, sorted(targets)
+          for name, target in targets.items():
+              directory = Path(target["dir"])
+              assert directory.is_dir(), f"{name}: missing dir {directory}"
+              # `dir = "."` is the one target allowed to sit atop the root
+              # manifest; every other target dir must not carry its own.
+              if target["dir"] != ".":
+                  nested = directory / ".zpkg.toml"
+                  assert not nested.exists(), f"{name}: nested manifest at {nested}"
+          PY
+
+      - name: Publish all four targets to a hermetic file registry
+        working-directory: awkward-lib
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZED="$GITHUB_WORKSPACE/zed-cli/target/release/zed"
+          echo "ZED=$ZED" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/reg"
+          "$ZED" publish --registry "file://$RUNNER_TEMP/reg" --skip-vcs-checks
+          test "$(find "$RUNNER_TEMP/reg" -name '*.tar.gz' | wc -l)" -eq 4
+
+      - name: Deep targets are re-rooted, and no language leaks into another
+        working-directory: awkward-lib
+        shell: bash
+        run: |
+          set -euo pipefail
+          list() { tar tzf ".zed/pack/zedtest-awkward-lib-$1-0.1.0.tar.gz"; }
+
+          # The node slice lives four levels down; none of that path may survive.
+          list nodejs > "$RUNNER_TEMP/nodejs.txt"
+          cat "$RUNNER_TEMP/nodejs.txt"
+          grep -Fxq pkg/index.js "$RUNNER_TEMP/nodejs.txt"
+          grep -Fxq pkg/package.json "$RUNNER_TEMP/nodejs.txt"
+          if grep -q 'clients/' "$RUNNER_TEMP/nodejs.txt"; then
+            echo "::error::the nodejs artifact kept its source path"
+            exit 1
+          fi
+
+          list python > "$RUNNER_TEMP/python.txt"
+          grep -Fxq pkg/pyproject.toml "$RUNNER_TEMP/python.txt"
+          grep -Fxq pkg/awkward_lib/__init__.py "$RUNNER_TEMP/python.txt"
+          if grep -q 'services/' "$RUNNER_TEMP/python.txt"; then
+            echo "::error::the python artifact kept its source path"
+            exit 1
+          fi
+
+          list rust > "$RUNNER_TEMP/rust.txt"
+          grep -Fxq pkg/Cargo.toml "$RUNNER_TEMP/rust.txt"
+          grep -Fxq pkg/src/lib.rs "$RUNNER_TEMP/rust.txt"
+
+          # Cross-language leakage: each slice must carry only its own manifest.
+          for pair in "nodejs:pyproject.toml" "nodejs:Cargo.toml" \
+                      "python:package.json" "python:Cargo.toml" \
+                      "rust:package.json" "rust:pyproject.toml"; do
+            slice="${pair%%:*}"; stray="${pair##*:}"
+            if grep -q "/$stray\$" "$RUNNER_TEMP/$slice.txt"; then
+              echo "::error::$stray leaked into the $slice artifact"
+              exit 1
+            fi
+          done
+
+          # Every slice keeps the repository-level licence.
+          for slice in nodejs python rust; do
+            grep -Fxq pkg/LICENSE "$RUNNER_TEMP/$slice.txt"
+          done
+
+      - name: The whole-repository target keeps full paths
+        working-directory: awkward-lib
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar tzf .zed/pack/zedtest-awkward-lib-repository-0.1.0.tar.gz \
+            > "$RUNNER_TEMP/repository.txt"
+          cat "$RUNNER_TEMP/repository.txt"
+          # dir = "." is the everything package: paths are preserved, not collapsed.
+          grep -Fxq pkg/clients/generated/v2/typescript/index.js "$RUNNER_TEMP/repository.txt"
+          grep -Fxq pkg/services/py-worker/pyproject.toml "$RUNNER_TEMP/repository.txt"
+          grep -Fxq pkg/deeply/nested/rust-core/src/lib.rs "$RUNNER_TEMP/repository.txt"
+
+      - name: A target carrying its own manifest is refused
+        working-directory: awkward-lib
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The documented invariant: packages are declared in exactly one place.
+          scratch="$RUNNER_TEMP/nested"
+          rm -rf "$scratch"
+          cp -a . "$scratch"
+          rm -rf "$scratch/.zed"
+          printf '[package]\norg = "zedtest"\nname = "sneaky"\nversion = "9.9.9"\nlicense = "MIT"\n' \
+            > "$scratch/services/py-worker/.zpkg.toml"
+          cd "$scratch"
+          if "$ZED" publish --registry "file://$RUNNER_TEMP/reg2" --skip-vcs-checks \
+              > out.log 2>&1; then
+            echo "::error::a nested .zpkg.toml was accepted"
+            cat out.log
+            exit 1
+          fi
+          cat out.log
+          grep -q 'contains its own .zpkg.toml' out.log
+
+      - name: Upload artifact-content diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: awkward-artifact-listings
+          path: ${{ runner.temp }}/*.txt
+          if-no-files-found: warn
+          retention-days: 7

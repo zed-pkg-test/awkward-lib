@@ -1,0 +1,7 @@
+{
+  "name": "@zedtest/awkward-lib",
+  "version": "0.1.0",
+  "description": "Node slice living under a generated-code path",
+  "license": "MIT",
+  "main": "index.js"
+}

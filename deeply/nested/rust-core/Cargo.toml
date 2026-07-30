@@ -1,0 +1,6 @@
+[package]
+name = "awkward-lib"
+version = "0.1.0"
+edition = "2021"
+description = "Rust slice three directories down, with a hyphen in the path"
+license = "MIT"
