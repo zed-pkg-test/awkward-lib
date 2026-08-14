@@ -136,7 +136,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tar tzf .zed/pack/zedtest-awkward-lib-repository-0.1.0.tar.gz \
+          tar tzf .zed/pack/zedtest-awkward-lib-0.1.0.tar.gz \
             > "$RUNNER_TEMP/repository.txt"
           cat "$RUNNER_TEMP/repository.txt"
           # dir = "." is the everything package: paths are preserved, not collapsed.
