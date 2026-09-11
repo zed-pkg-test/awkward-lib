@@ -41,4 +41,4 @@ dir = "deeply/nested/rust-core"
 #    both per-language packages and an everything package.
 [targets.repository]
 dir = "."
-name = "awkward-lib-repository"
+name = "awkward-lib"
