@@ -6,7 +6,10 @@ Cargo.lock
 dist/
 build/
 *.egg-info/
-tmp
-temp
+tmp/
+temp/
 tmp/worktrees
 temp/worktrees
+
+# machine-local symlink to ORESoftware/my-ai AGENTS.md; never committed
+.ores/
